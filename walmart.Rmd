@@ -1,0 +1,196 @@
+---
+title: "Walmart commerce analysis and ARIMA forecasting"
+output: pdf_document
+author: "Brian Chen"
+---
+
+Data from https://www.kaggle.com/yasserh/walmart-dataset.
+
+Packages to be used.
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(scales)
+
+options(scipen = 999)
+```
+
+Import data and do some light cleaning.
+
+```{r}
+walmart = read.csv("walmart.csv")
+head(walmart)
+```
+
+```{r}
+walmart$Date = dmy(walmart$Date)
+walmart = clean_names(walmart)
+
+head(walmart)
+```
+
+How many total weeks are being examined for each store?
+
+```{r}
+walmart %>% count(store)
+```
+
+Take a look at monthly sales for all years combined.
+
+```{r}
+monthly_sales = walmart %>% 
+  group_by(store, month(date)) %>%
+  summarize(total = sum(weekly_sales)) %>%
+  rename(month = `month(date)`)
+
+head(monthly_sales)
+
+monthly_sales %>% 
+  ggplot(aes(x=month,y=total,group=store))+
+  geom_line()+
+  facet_wrap(~store, ncol=9)+
+  scale_y_continuous(labels=scales::dollar_format())
+```
+Create function to show the most/least profitable store per year.
+
+```{r}
+years = walmart %>% 
+  group_by(year(date)) %>%
+  group_split()
+
+yearly_sales = function(year) {
+  year %>%
+  group_by(store, month(date)) %>%
+  summarize(sales = sum(weekly_sales)) %>%
+  ungroup() %>%
+  group_by(store) %>%
+  mutate(total = sum(sales)) %>%
+  ungroup() %>%
+  rename(month = `month(date)`) %>%
+  arrange(desc(total)) %>%
+  ggplot(aes(x=month, y=sales, group=store))+
+    geom_line()+
+    facet_wrap(~reorder(store, -total), ncol=9)+
+    scale_y_continuous(labels=scales::dollar_format())+
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank()
+    )+
+    ggtitle(paste0("Most profitable stores in ", 
+                  year$date[1] %>% str_extract("(201.)")))
+}
+
+yearly_sales(years[[1]]) #Caveat: data is missing January
+yearly_sales(years[[2]])
+yearly_sales(years[[3]]) #Caveat: data is missing November and December
+```
+Checking overall performance of stores over the three years, check the ranking over each year, and check the best/worst performing stores over that period.
+
+```{r}
+rankings = walmart %>%
+  group_by(store, year(date)) %>%
+  summarize(total = sum(weekly_sales)) %>%
+  ungroup() %>%
+  rename(year = `year(date)`) %>%
+  arrange(year, desc(total)) %>%
+  mutate(score = rep(1:45,3))  #can assign score so easily b/c already arranged
+
+
+rankings %>%
+  select(store, year, score) %>%
+  pivot_wider(names_from = year, values_from = score)
+
+
+rankings %>%
+  group_by(store) %>%
+  summarize(ranking = sum(score)) %>%
+  arrange(ranking) #the lower the score, the better performing
+```
+
+Checking the most profitable months.
+
+```{r}
+#most profitable months?
+
+year_sales = walmart %>%
+  group_by(year(date), month(date)) %>%
+  summarize(total = sum(weekly_sales)) %>%
+  rename(month = `month(date)`,
+         year = `year(date)`) %>%
+  pivot_wider(names_from = year, values_from=total) %>% #doing this to use replace 0s
+  arrange(month) %>%
+  replace(is.na(.), 0) %>%
+  pivot_longer(!month, names_to="year", values_to="total")
+  
+
+ggplot(year_sales, aes(x=month,y=total,fill=year))+
+  geom_bar(position="dodge", width=0.6, stat="identity") +
+  scale_x_discrete(limits = month.abb) +
+  scale_y_continuous(labels=scales::dollar_format()) +
+  ggtitle(label="Most profitable months, 2010-2012")
+  
+```
+
+Build ARIMA model for store 1
+
+```{r}
+#Store 1 ARIMA
+
+store1 = walmart %>% filter(store == 1) %>% select(date, weekly_sales)
+ggplot(store1, aes(x=date, y=weekly_sales)) +
+  geom_line()
+```
+
+```{r}
+
+store1ts = ts(store1, frequency=52, start=c(decimal_date(ymd("2010-02-05"))))
+store1d = decompose(store1ts, "multiplicative")
+plot(store1d)
+
+```
+
+```{r}
+library(forecast)
+
+arima = auto.arima(store1ts[,2])
+plot.ts(arima$residuals)
+```
+```{r}
+forecast = forecast(arima, h=52)
+autoplot(forecast)
+```
+
+Using the Ljung-Box test to check accuracy.
+
+```{r}
+Box.test(arima$resid, lag=5, type="Ljung-Box")
+Box.test(arima$resid, lag=10, type="Ljung-Box")
+Box.test(arima$resid, lag=15, type="Ljung-Box")
+```
+
+Writing a reusable ARIMA function.
+
+```{r}
+store_arima = function(storeNum, weeks_forecasted) {
+  df = walmart %>% 
+    filter(store == storeNum) %>%
+    select(date, weekly_sales)
+  
+  print(ggplot(df, aes(x=date, y=weekly_sales)) +
+      geom_line() +
+      ggtitle(label=paste0("Sales for Store ", storeNum)))
+
+  df_ts = ts(df, frequency=52, start=c(decimal_date(ymd("2010-02-05"))))
+  
+  df_d = decompose(df_ts, "multiplicative") %>% plot()
+  
+  forecast(auto.arima(df_ts[,2]), h=weeks_forecasted) %>% autoplot()
+}
+
+store_arima(6,20) #store_arima(which store, forecast how many weeks)
+
+```
+
